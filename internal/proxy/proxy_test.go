@@ -184,7 +184,7 @@ func TestClientCredentialsStripped(t *testing.T) {
 		"Forwarded":            {"host=evil.test"},
 		"X-Keep":               {"yes"},
 	}
-	wantStatus(t, hs.do("GET", "/search/web?q=hello&KEY=own&Key=own2", h, nil), 200)
+	wantStatus(t, hs.do("GET", "/search/web?q=hello", h, nil), 200)
 	got := hs.up.last(t)
 	if v := got.Header.Values("Authorization"); len(v) != 1 || v[0] != "Bearer "+searchSecret {
 		t.Errorf("upstream Authorization = %q", v)
@@ -199,6 +199,13 @@ func TestClientCredentialsStripped(t *testing.T) {
 	}
 	if q := got.URL.Query(); q.Get("q") != "hello" || len(q) != 1 {
 		t.Errorf("upstream query = %q", got.URL.RawQuery)
+	}
+
+	// A route's query slot is stripped in every case variant.
+	wantStatus(t, hs.do("GET", "/github-issues/repos/elicollinson/Solenoid-Assistant/issues?state=open&KEY=own&Key=own2",
+		http.Header{"X-Subscription-Token": {aliceToken}}, nil), 200)
+	if q := hs.up.last(t).URL.RawQuery; q != "state=open" {
+		t.Errorf("upstream query = %q", q)
 	}
 }
 
@@ -363,7 +370,7 @@ func TestEchoedSecretRedacted(t *testing.T) {
 func TestScrubberAcrossReadBoundaries(t *testing.T) {
 	secret := "SECRET-0123456789"
 	in := "x" + secret + "y" + secret[:5] + "-not-it " + secret
-	r := newScrubber(io.NopCloser(iotest.OneByteReader(strings.NewReader(in))), []string{secret}, func() {})
+	r := newScrubber(io.NopCloser(iotest.OneByteReader(strings.NewReader(in))), newRedactor([]string{secret}), func() {})
 	out, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatal(err)
@@ -381,7 +388,7 @@ func TestScrubberAcrossReadBoundaries(t *testing.T) {
 
 func TestScrubberDoesNotHoldBackUnrelatedBytes(t *testing.T) {
 	pr, pw := io.Pipe()
-	r := newScrubber(pr, []string{"SECRET-0123456789"}, func() {})
+	r := newScrubber(pr, newRedactor([]string{"SECRET-0123456789"}), func() {})
 	go pw.Write([]byte("data: event one\n\n"))
 	buf := make([]byte, 64)
 	done := make(chan int)

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,6 +154,10 @@ func TestCallerSlotsParse(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("slot %d = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+	r := c.Routes["openrouter"]
+	if fmt.Sprint(r.StripHeaders) != "[X-Subscription-Token]" || fmt.Sprint(r.StripParams) != "[key]" {
+		t.Errorf("strip lists = %v, %v", r.StripHeaders, r.StripParams)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -311,7 +312,7 @@ func newHarness(t *testing.T, h http.HandlerFunc) *harness {
 	}
 	dialer := &net.Dialer{}
 	hs.p, err = New(cfg, hs.store, Options{
-		Log:     &logs,
+		Log:     slog.New(slog.NewJSONHandler(&logs, nil)),
 		RootCAs: pki.pool,
 		Now:     hs.clock.Now,
 		// Upstream names resolve to the fakes; anything else, such as

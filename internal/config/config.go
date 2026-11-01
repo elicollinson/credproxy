@@ -43,6 +43,11 @@ type Route struct {
 	Name  string   `json:"-"`
 	Base  *url.URL `json:"-"`
 	Slots []Slot   `json:"-"`
+	// StripHeaders and StripParams are the route's own credential slots,
+	// removed from every request on top of the global list (R6). Params are
+	// lowercase and matched without case.
+	StripHeaders []string `json:"-"`
+	StripParams  []string `json:"-"`
 }
 
 type Credential struct {

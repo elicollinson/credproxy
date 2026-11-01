@@ -135,6 +135,7 @@ The config is JSON, decoded with `DisallowUnknownFields` plus a check for traili
 ```json
 {
   "listen": ["127.0.0.1:8787"],
+  "host_aliases": ["host.docker.internal:8787"],
   "allow_non_loopback": false,
   "max_body_bytes": 33554432,
   "routes": {
@@ -211,6 +212,7 @@ The config is JSON, decoded with `DisallowUnknownFields` plus a check for traili
 ### 4.1 Validation rules
 
 - **`listen`:** each entry is `host:port` with a literal IP. A non-loopback IP requires `"allow_non_loopback": true` and logs a warning at every start. `0.0.0.0` and `::` are non-loopback.
+- **`host_aliases`** are extra `Host` values to accept (R7), each `host:port`. Containers reaching the proxy through `host.docker.internal` need one.
 - **Route names** match `^[a-z0-9][a-z0-9-]{0,62}$`, so they are always a single safe path segment.
 - **`upstream`** must:
   - use `https`,
@@ -268,7 +270,7 @@ Each rule gets at least one test (§7).
   - empty segments (`//`),
   - `.` or `..` segments,
   - a trailing `.` segment,
-  - any path where `path.Clean(p) != p` (allowing a single trailing slash only if a rule names it).
+  - any path where `path.Clean(p) != p`, which includes a trailing slash.
 
   The forwarded path is byte-for-byte the matched path.
 - **R6. Strip, then inject.** Before injection the proxy removes:
@@ -283,20 +285,20 @@ Each rule gets at least one test (§7).
   - never adds `X-Forwarded-For`,
   - never emits CORS headers.
 
-  It rejects requests with an `Origin` header (no browser callers), and requests whose `Host` isn't one of its listen addresses or `localhost:<port>`. That blocks DNS rebinding from a browser tab.
+  It rejects requests with an `Origin` header (no browser callers), and requests whose `Host` isn't one of its listen addresses, `localhost:<port>` or a configured `host_aliases` entry. That blocks DNS rebinding from a browser tab.
 - **R8. No redirects followed.** The transport never follows redirects (`ReverseProxy` doesn't, and we assert it).
   - A 3xx with a `Location` on the same scheme, host and port, under the upstream base path, is rewritten to the proxy path.
   - Any other `Location` gets a 502, and the reason is logged without the URL.
 - **R9. TLS.** Verification is always on, with `MinVersion` set to TLS 1.2. There is no `InsecureSkipVerify` anywhere in non-test code (grep check in CI). HTTP/2 stays enabled (`ForceAttemptHTTP2`).
-- **R10. No secrets in output.** Each log line is one JSON object with exactly these fields: `time`, `caller`, `route`, `method`, `path_template` (the allowlist pattern that matched, never the real path), `status`, `latency_ms`, `bytes_in`, `bytes_out`, plus `reason` (a fixed enum string) on failure. Specifically:
+- **R10. No secrets in output.** Each log line is one JSON object with exactly these fields: `time`, `caller`, `route`, `method`, `path_template` (the allowlist pattern that matched, never the real path), `status`, `latency_ms`, `bytes_in`, `bytes_out`, plus `reason` (a fixed enum string) on failure and `alert` when R11 fired. Specifically:
   - No URL, query, header or body is ever logged.
-  - `ReverseProxy.ErrorHandler` and `ErrorLog` are replaced, and `http.Server.ErrorLog` is replaced, because `*url.Error` strings contain the full URL, including `?key=`.
+  - `ReverseProxy.ErrorHandler` and `ErrorLog` are replaced, and so is `http.Server.ErrorLog`. Error text is never logged, so what an error message happens to contain (a host, a URL from some future wrapper) can't matter.
   - Handler panics are recovered by our own middleware, which logs `reason: "panic"` with no value or stack. `http.ErrAbortHandler` is re-panicked so streaming aborts behave as normal.
   - Error responses to callers are fixed strings.
-- **R11. Response scrubbing.** Response headers and body are scanned for the injected secret (raw, plus its basic-auth base64 and its JSON-escaped forms) and replaced at the same length. A match logs `reason: "upstream_echoed_secret"`. The streaming matcher keeps a tail of `len(secret)−1` bytes across chunks, and each chunk is flushed immediately after the scan.
+- **R11. Response scrubbing.** Response headers and body are scanned for the injected secret (raw, plus its basic-auth base64 and its JSON-escaped forms) and replaced at the same length. A match logs `alert: "upstream_echoed_secret"` at warn level. The streaming matcher keeps a tail of `len(secret)−1` bytes across chunks, and each chunk is flushed immediately after the scan.
 - **R12. Streaming.** `FlushInterval: -1`. There is no total-response timeout and no `WriteTimeout`. SSE events reach the caller as they arrive.
 - **R13. WebSocket.** Upgrades are allowed only on routes with `"websocket": true`. They go through the same auth, allowlist, strip and inject (including `query` injection). `Sec-WebSocket-Extensions` is stripped. After the 101, server-to-client bytes still pass through the scrubber.
-- **R14. Size limits.** Request bodies are limited by `http.MaxBytesReader`, with 413 on overflow. Headers are limited by `MaxHeaderBytes` (64 KiB).
+- **R14. Size limits.** A declared `Content-Length` over the limit is a 413 straight away. A body of unknown length is read into memory first, up to the limit, so an oversized one never reaches the upstream. Headers are limited by `MaxHeaderBytes` (64 KiB).
 - **R15. Isolated rate limits.** Each caller has its own token bucket, and one caller's exhaustion never affects another's. A 429 never reveals other callers' state, and it is decided only after authentication, so it reveals nothing to an unauthenticated client.
 - **R16. Google SA.** The SA private key is used only inside the process to sign the JWT. Rules:
   - `token_uri` must equal `https://oauth2.googleapis.com/token`; anything else refuses to mint.
@@ -322,12 +324,20 @@ The `Injector` interface:
 
 ```go
 type Injector interface {
-    // Apply sets the credential on out. Only called after R2 passes.
-    Apply(ctx context.Context, out *http.Request, store keychain.SecretStore) error
-    // Scrub returns the byte strings R11 redacts from this request's response.
-    Scrub() [][]byte
+    // Acquire runs after R2, before forwarding, so it can fail: a missing
+    // key, a locked Keychain, a token endpoint that's down. A type that
+    // mints tokens (google_service_account) keeps its cache behind it.
+    Acquire(ctx context.Context, store keychain.Store) (Cred, error)
+}
+
+// Cred is attached in ReverseProxy's Rewrite, which can't fail.
+type Cred struct {
+    Header, Param, Value string
+    Needles []string // forms of the secret for the R11 scrubber
 }
 ```
+
+Which headers and query parameters each route strips (R6) is computed once, in config validation, from `caller_auth` and `inject`.
 
 Adding a type later means one file plus one case in config validation.
 
@@ -352,7 +362,7 @@ Adversarial tests are written first. Each must fail before its code exists, and 
 | T9 | `Origin` header → 400; `Host` not a listen address → 400 | R7 |
 | T10 | Upstream 302 to another host → 502; the other host sees 0 connections. Same-host 301 → `Location` rewritten to the proxy path | R8 |
 | T11 | Upstream echoes the secret in a response header, in the body, across a chunk boundary, as base64 basic, and JSON-escaped → caller sees only same-length redaction; alert logged; `Content-Length` responses still parse | R11 |
-| T12 | Log-capture assertion over the whole suite, including forced dial errors, TLS errors with `?key=` in the URL, and an injected panic | R10 |
+| T12 | Log-capture assertion over the whole suite (the JSON log and fd 2), including forced dial and TLS errors on requests carrying `?key=`, and a panic whose value holds a secret. Checked by mutation: logging the request URL fails the run | R10 |
 | T13 | SSE: upstream sends 5 events 200 ms apart; the client records arrival times, and each event arrives before the next is sent | R12 |
 | T14 | WebSocket with `query` injection: a hand-rolled RFC 6455 client and server in test code (stdlib only) upgrade, exchange frames both ways, upstream sees `key=<real>`, and the log check passes | R13, R10 |
 | T15 | Google SA: parse the JWT and verify RS256 with the test public key; check `iss`/`scope`/`aud`/`iat`/`exp`; the fake token endpoint is called once for N requests; fake clock near expiry triggers exactly one refresh under concurrency; bad `token_uri` refuses | R16 |

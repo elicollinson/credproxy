@@ -1,29 +1,60 @@
-// Package inject attaches an upstream credential to an outbound request.
+// Package inject turns a stored secret into the credential an upstream
+// expects.
 package inject
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/elicollinson/credproxy/internal/config"
+	"github.com/elicollinson/credproxy/internal/keychain"
 )
 
-// Injector puts one kind of credential on a request. Adding a type means a
-// new implementation here and a case in config validation.
+// Injector gets one route's credential for one request. Acquire runs before
+// forwarding, so it may fail (a missing key, a token endpoint that's down);
+// a type that mints tokens keeps its cache behind it. Adding a type means an
+// implementation here and a case in config validation.
 type Injector interface {
-	// Apply attaches secret to out and returns every form of it that may
-	// appear on the wire, for the response scrubber.
-	Apply(out *http.Request, secret string) []string
-	// Header and Param name where the credential goes, so a caller's own
-	// copy is stripped first. Empty when unused.
-	Header() string
-	Param() string
+	Acquire(ctx context.Context, store keychain.Store) (Cred, error)
 }
 
-// Stub: injection lands after the failing tests are committed.
-func New(c config.Inject) (Injector, error) { return bearer{}, nil }
+// Cred is a credential ready to attach: a header, or a query parameter.
+type Cred struct {
+	Header, Param, Value string
+	// Needles are the forms of the secret the response scrubber looks for.
+	Needles []string
+}
 
-type bearer struct{}
+// Apply sets the credential on out, replacing anything already there.
+func (c Cred) Apply(out *http.Request) {
+	if c.Header != "" {
+		out.Header.Set(c.Header, c.Value)
+	}
+	if c.Param != "" {
+		q := out.URL.Query()
+		q.Set(c.Param, c.Value)
+		out.URL.RawQuery = q.Encode()
+	}
+}
 
-func (bearer) Apply(out *http.Request, secret string) []string { return nil }
-func (bearer) Header() string                                  { return "" }
-func (bearer) Param() string                                   { return "" }
+// New returns the injector for a route. Phase 1 has bearer only.
+func New(r *config.Route) (Injector, error) {
+	switch r.Inject.Type {
+	case "bearer":
+		return bearer{r.Credential}, nil
+	}
+	return nil, fmt.Errorf("inject type %q is not implemented yet", r.Inject.Type)
+}
+
+type bearer struct{ cred config.Credential }
+
+func (b bearer) Acquire(_ context.Context, store keychain.Store) (Cred, error) {
+	secret, err := store.Get(b.cred.Service, b.cred.Account)
+	if err != nil {
+		return Cred{}, err
+	}
+	s := string(secret)
+	clear(secret)
+	return Cred{Header: "Authorization", Value: "Bearer " + s, Needles: []string{s}}, nil
+}
