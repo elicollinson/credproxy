@@ -17,6 +17,20 @@ import (
 
 var discardLogger = log.New(io.Discard, "", 0)
 
+// logAfter waits for the log, from offset from, to contain want. The line is
+// written after the response has gone out, so a client can see the response
+// first.
+func logAfter(t *testing.T, from int, want string) string {
+	t.Helper()
+	for range 100 {
+		if got := logs.String()[from:]; strings.Contains(got, want) {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return logs.String()[from:]
+}
+
 func TestHappyPathInjectsOnlyTheRealCredential(t *testing.T) {
 	hs := newHarness(t, nil)
 	resp := hs.do("GET", "/openrouter/models", bearer(aliceToken), nil)
@@ -362,7 +376,7 @@ func TestEchoedSecretRedacted(t *testing.T) {
 			}
 		})
 	}
-	if !strings.Contains(logs.String(), "upstream_echoed_secret") {
+	if !strings.Contains(logAfter(t, 0, "upstream_echoed_secret"), "upstream_echoed_secret") {
 		t.Error("echo not logged as an alert")
 	}
 }
@@ -434,7 +448,7 @@ func TestLogLineShape(t *testing.T) {
 	hs := newHarness(t, nil)
 	before := logs.Len()
 	hs.do("GET", "/github-issues/repos/elicollinson/Solenoid-Assistant/issues/77?state=open", bearer(aliceToken), nil)
-	line := logs.String()[before:]
+	line := logAfter(t, before, `"caller":"alice"`)
 	for _, want := range []string{`"caller":"alice"`, `"route":"github-issues"`, `"path_template":"/repos/elicollinson/Solenoid-Assistant/issues/*"`, `"status":200`, `"latency_ms"`, `"bytes_out"`} {
 		if !strings.Contains(line, want) {
 			t.Errorf("log line lacks %s: %s", want, line)
