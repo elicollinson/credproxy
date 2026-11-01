@@ -72,13 +72,23 @@ It never holds a key it could carry off and use elsewhere. Revoking a caller is 
 
 `access` comes from `SecAccessCreate(label, [self])`, where `self` is from `SecTrustedApplicationCreateFromPath(NULL, &self)`. A `NULL` path means "the calling application". `key set` is a subcommand of the same signed binary, so the creator is the daemon's identity.
 
-Reads use `SecItemCopyMatching` with `kSecReturnData`. For a signed binary, the ACL stores the code's **designated requirement**, not its cdhash. An Apple Development signature's DR is roughly:
+Reads use `SecItemCopyMatching` with `kSecReturnData`. For a signed binary, the ACL stores the code's **designated requirement** (DR), not its cdhash, so access survives rebuilds as long as the DR stays the same. With ad-hoc signing the ACL pins the cdhash and every rebuild prompts, which is why constraint 5 (a stable identity) matters.
+
+**Signing identity: a self-signed code-signing certificate, no developer account needed.** It is created once, in Keychain Access (Certificate Assistant → Create a Certificate, type "Code Signing") or with `openssl`, and set to Always Trust for code signing. Its DR is:
 
 ```
-identifier "com.elicollinson.credproxy" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: …" and certificate 1[field.1.2.840.113635.100.6.2.1]
+identifier "com.elicollinson.credproxy" and certificate leaf = H"<sha1 of the certificate>"
 ```
 
-That DR stays the same across rebuilds and across install paths. This is why constraint 5 (a stable identity) matters: with ad-hoc signing, the ACL pins the cdhash and every rebuild prompts. Since macOS 10.12, `SecItemAdd` from a team-signed binary also sets the item's partition list to `teamid:<TEAMID>`, which adds a second gate against unsigned callers. `/usr/bin/security` is in neither list, which is the point of constraint 2.
+That DR is identical across builds and install paths. A free Apple ID "Apple Development" certificate from Xcode works too. Its DR is `identifier … and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: …" and …`. The paid program only matters for distributing to other people, which is out of scope. The Makefile takes either identity as `SIGN_IDENTITY`. `make cert` prints the steps for the self-signed one.
+
+Trade-offs between the two:
+
+- **Self-signed pins the exact certificate.** If it is ever regenerated or lost, the DR changes and every item must be re-created with `key set`. It can be issued for 10 years, and losing it costs a few minutes, not a key rotation.
+- **Apple Development certificates expire after a year,** but their DR names the CN rather than the leaf, so a renewal keeps access.
+- **Partition list (to verify in Phase 3).** Since macOS 10.12, items also carry a partition list. A team-signed binary gets `teamid:<TEAMID>`, but a self-signed certificate has no team ID. If securityd falls back to a per-cdhash partition there, every rebuild would raise one "allow" prompt despite the stable DR. T20 includes "rebuild, re-sign, read without a prompt" to settle this. If it fails, the fallback is the free Apple Development certificate, which has a team ID, with no design change.
+
+`/usr/bin/security` is in neither the ACL nor the partition list, which is the point of constraint 2.
 
 **Deprecation status.** These APIs have been marked deprecated since 10.10 ("SecKeychain is deprecated"), but they are still declared in the macOS 26.5 SDK on this machine. They are the only supported way to put a per-application ACL on a file-based Keychain item. We compile the cgo file with `-Wno-deprecated-declarations` and isolate it behind an interface (§3.3), so replacing it later touches one file.
 
@@ -293,7 +303,7 @@ Each rule gets at least one test (§7).
   - The access token is cached until 5 minutes before `expires_in`, with single-flight refresh.
   - A refresh failure is a 502 and is never retried in a loop.
 - **R17. Startup fails closed.** Any config error, a config file looser than `0600` or not owned by me, or a non-loopback listener without opt-in stops startup.
-- **R18. Signed and hardened.** The `make` build signs with `$(SIGN_IDENTITY)`, using `--options runtime` (the hardened runtime) and no `get-task-allow` entitlement. That blocks same-user debugger attach and dylib injection. `key set` refuses to run unless the running binary is validly signed (`SecCodeCheckValidity` on self). Without that check, an unsigned dev build would create items pinned to a throwaway cdhash.
+- **R18. Signed and hardened.** The `make` build signs with `$(SIGN_IDENTITY)` (self-signed or Apple Development, §3), using `--options runtime` (the hardened runtime) and no `get-task-allow` entitlement. That blocks same-user debugger attach and dylib injection. `key set` refuses to run unless the running binary is validly signed (`SecCodeCheckValidity` on self). Without that check, an unsigned dev build would create items pinned to a throwaway cdhash.
 
 ## 6. Components (planned layout)
 
@@ -350,7 +360,7 @@ Adversarial tests are written first. Each must fail before its code exists, and 
 | T17 | Body over the limit → 413, upstream 0 | R14 |
 | T18 | Config table: each invalid field is rejected with its path; unknown field rejected; mode 0644 file rejected; `0.0.0.0` without opt-in rejected | R17 |
 | T19 | Transport config assertions: `MinVersion`, no `InsecureSkipVerify` (grep test), redirects not followed | R9, R8 |
-| T20 | Keychain (macOS only, `-tags keychain_integration`, not in default CI): set/get/rm round trip in a temporary keychain; `key list` returns no data | §3 |
+| T20 | Keychain (macOS only, `-tags keychain_integration`, not in default CI): set/get/rm round trip in a temporary keychain; `key list` returns no data; rebuild and re-sign with the same identity, then read with no prompt | §3 |
 
 **CI** (GitHub Actions on `macos-15`):
 
