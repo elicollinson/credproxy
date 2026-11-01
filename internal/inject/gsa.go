@@ -70,10 +70,19 @@ func (sa *serviceAccount) mint(ctx context.Context, store keychain.Store) error 
 		return ErrInvalid
 	}
 	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	clear(block.Bytes)
 	rsaKey, ok := parsed.(*rsa.PrivateKey)
 	if err != nil || !ok {
 		return ErrInvalid
 	}
+	// Best effort (DESIGN.md §2.9): the PEM string and the rsa package's own
+	// copies stay on the heap.
+	defer func() {
+		clear(rsaKey.D.Bits())
+		for _, p := range rsaKey.Primes {
+			clear(p.Bits())
+		}
+	}()
 
 	now := sa.env.Now()
 	enc := func(v any) string {

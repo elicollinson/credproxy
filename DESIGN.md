@@ -21,6 +21,7 @@ It never holds a key it could carry off and use elsewhere. Revoking a caller is 
 **Residual risks we accept:**
 
 - **Keychain prompts.** Another process asking for a credproxy item gets a Keychain dialog that names it. If I click "Always Allow", that process is trusted from then on. Synthetic clicks on that dialog are blocked by TCC, so the defence holds as long as I don't approve the dialog myself.
+- **The signing key.** The Keychain trusts whatever is signed with my identity, and that identity's private key is in my login keychain too. Same-user code that can use the key can sign its own binary as credproxy and read every item. When `codesign` asks to use the key, I click "Allow", never "Always Allow", so every signing prompts and an unexpected prompt is the signal. Stronger: keep the identity in a separate keychain that stays locked except during `make build`.
 - **Port squatting.** Same-user code can stop the LaunchAgent and bind its port to collect caller tokens. Caller tokens aren't upstream keys, so this gains it nothing beyond what it already had.
 - **Config edits.** Same-user code can edit the config to widen its own allowlist. The config file is user-writable by necessity. **Mitigation:** credproxy refuses to start unless the config file is mode `0600` or stricter and owned by me, and it logs a SHA-256 of the config at start. It doesn't stop the edit, but the change shows up in the log. I don't think anything stronger is worth its complexity under this threat model. Push back if you disagree.
 
