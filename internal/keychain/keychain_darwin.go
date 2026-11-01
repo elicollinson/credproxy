@@ -226,23 +226,20 @@ func (k *Keychain) call(f func(path, service, account *C.char) C.OSStatus, servi
 	}
 	svc := C.CString(service)
 	defer C.free(unsafe.Pointer(svc))
-	switch st := f(path, svc, acct); st {
-	case C.errSecSuccess:
+	st := f(path, svc, acct)
+	switch {
+	case st == C.errSecSuccess:
 		return nil
-	case C.errSecItemNotFound:
+	case st == C.errSecItemNotFound:
 		return ErrNotFound
-	case C.errSecInteractionNotAllowed:
-		// Prompts are off: either the keychain is locked or the item's ACL
-		// doesn't trust us and would have asked.
-		if C.cp_locked(path) != 0 {
-			return ErrLocked
-		}
+	case C.cp_locked(path) != 0:
+		// With prompts off, a locked keychain fails with various statuses.
+		return ErrLocked
+	case st == C.errSecInteractionNotAllowed, st == C.errSecAuthFailed, st == C.errSecUserCanceled:
+		// The item's ACL doesn't trust us, and would have asked.
 		return ErrDenied
-	case C.errSecAuthFailed, C.errSecUserCanceled:
-		return ErrDenied
-	default:
-		return fmt.Errorf("keychain: OSStatus %d", int(st))
 	}
+	return fmt.Errorf("keychain: OSStatus %d", int(st))
 }
 
 // Identifier is the signing identifier every item's ACL is pinned to,

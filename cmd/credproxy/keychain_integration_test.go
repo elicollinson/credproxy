@@ -64,7 +64,8 @@ func TestKeychainRoundTrip(t *testing.T) {
 
 	cfg := filepath.Join(dir, "config.json")
 	os.WriteFile(cfg, []byte(`{"routes": {"t20": {"upstream": "https://example.com", "credential": {"account": "t20"},
-	  "inject": {"type": "bearer"}, "allow": [{"methods": ["GET"], "paths": ["/x"]}]}}, "callers": {}}`), 0o600)
+	  "inject": {"type": "bearer"}, "allow": [{"methods": ["GET"], "paths": ["/x"]}]}},
+	  "callers": {"t20": {"token_sha256": "`+strings.Repeat("a", 64)+`", "routes": ["t20"]}}}`), 0o600)
 
 	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
 	build(t, a, "t20-a")
@@ -92,10 +93,8 @@ func TestKeychainRoundTrip(t *testing.T) {
 			t.Fatalf("%s key check (rebuilt binary must read with no prompt): %v\n%s", filepath.Base(bin), err, out)
 		}
 	}
-	for _, s := range []string{out} {
-		if strings.Contains(s, t20Secret) {
-			t.Fatal("key check printed the secret")
-		}
+	if strings.Contains(out, t20Secret) {
+		t.Fatal("key check printed the secret")
 	}
 
 	if out, err := credproxy(t, b, "", "key", "rm", "-keychain", kc, "t20"); err != nil {
