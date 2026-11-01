@@ -297,13 +297,14 @@ Each rule gets at least one test (§7).
   - Error responses to callers are fixed strings.
 - **R11. Response scrubbing.** Response headers and body are scanned for the injected secret (raw, plus its basic-auth base64 and its JSON-escaped forms) and replaced at the same length. A match logs `alert: "upstream_echoed_secret"` at warn level. The streaming matcher keeps a tail of `len(secret)−1` bytes across chunks, and each chunk is flushed immediately after the scan.
 - **R12. Streaming.** `FlushInterval: -1`. There is no total-response timeout and no `WriteTimeout`. SSE events reach the caller as they arrive.
-- **R13. WebSocket.** Upgrades are allowed only on routes with `"websocket": true`. They go through the same auth, allowlist, strip and inject (including `query` injection). `Sec-WebSocket-Extensions` is stripped. After the 101, server-to-client bytes still pass through the scrubber.
+- **R13. WebSocket.** Upgrades are allowed only on routes with `"websocket": true`. They go through the same auth, allowlist, strip and inject (including `query` injection). `Sec-WebSocket-Extensions` is stripped. After the 101, server-to-client frames are redacted one frame at a time and released as soon as each is complete. (The byte-stream scrubber's held-back tail could stall the last message of a turn.) Server frames that are masked, or larger than 16 MiB, close the connection. A secret split across two fragments of one message is not caught.
 - **R14. Size limits.** A declared `Content-Length` over the limit is a 413 straight away. A body of unknown length is read into memory first, up to the limit, so an oversized one never reaches the upstream. Headers are limited by `MaxHeaderBytes` (64 KiB).
 - **R15. Isolated rate limits.** Each caller has its own token bucket, and one caller's exhaustion never affects another's. A 429 never reveals other callers' state, and it is decided only after authentication, so it reveals nothing to an unauthenticated client.
 - **R16. Google SA.** The SA private key is used only inside the process to sign the JWT. Rules:
   - `token_uri` must equal `https://oauth2.googleapis.com/token`; anything else refuses to mint.
   - The access token is cached until 5 minutes before `expires_in`, with single-flight refresh.
   - A refresh failure is a 502 and is never retried in a loop.
+  - An SA JSON that doesn't parse, has no RSA key, or names another `token_uri` is a 503 `credential_invalid`, and nothing is contacted.
 - **R17. Startup fails closed.** Any config error, a config file looser than `0600` or not owned by me, or a non-loopback listener without opt-in stops startup.
 - **R18. Signed and hardened.** The `make` build signs with `$(SIGN_IDENTITY)` (self-signed or Apple Development, §3), using `--options runtime` (the hardened runtime) and no `get-task-allow` entitlement. That blocks same-user debugger attach and dylib injection. `key set` refuses to run unless the running binary is validly signed (`SecCodeCheckValidity` on self). Without that check, an unsigned dev build would create items pinned to a throwaway cdhash.
 

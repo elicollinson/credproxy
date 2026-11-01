@@ -14,6 +14,9 @@ import (
 // logRequest writes one line per request with only these fields (R10): no
 // URL, query, header or body, and the allowlist pattern instead of the path.
 func (p *Proxy) logRequest(st *state, rec *recorder, latency time.Duration) {
+	if st.upgraded && rec.status == 0 {
+		rec.status = http.StatusSwitchingProtocols
+	}
 	attrs := []slog.Attr{
 		slog.String("caller", st.caller),
 		slog.String("route", st.route),
@@ -22,7 +25,7 @@ func (p *Proxy) logRequest(st *state, rec *recorder, latency time.Duration) {
 		slog.Int("status", rec.status),
 		slog.Int64("latency_ms", latency.Milliseconds()),
 		slog.Int64("bytes_in", st.bytesIn.n),
-		slog.Int64("bytes_out", rec.bytes),
+		slog.Int64("bytes_out", rec.bytes+st.upgradedOut.Load()),
 	}
 	level := slog.LevelInfo
 	if st.reason != "" {

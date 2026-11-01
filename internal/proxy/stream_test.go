@@ -19,7 +19,7 @@ import (
 // The upstream waits for the caller to confirm each one, so any buffering
 // in the proxy stalls the stream and fails the test.
 func TestServerSentEventsAreNotBuffered(t *testing.T) {
-	got := make(chan struct{})
+	got := make(chan struct{}, 5)
 	stalled := make(chan int, 1)
 	hs := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

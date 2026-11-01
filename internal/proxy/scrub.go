@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"slices"
 	"strings"
+	"sync/atomic"
 )
 
 const marker = "[redacted]"
@@ -112,3 +115,71 @@ func (s *scrubber) Read(p []byte) (int, error) {
 }
 
 func (s *scrubber) Close() error { return s.r.Close() }
+
+// frameScrubber redacts server-to-client WebSocket frames after a 101
+// (R13). Each frame is released as soon as it is complete: holding back a
+// tail that might begin a needle, as scrubber does, could stall the last
+// message of a turn until the server next speaks. Frames are redacted one at
+// a time, so a secret split across two fragments of a message isn't caught.
+type frameScrubber struct {
+	io.ReadWriteCloser
+	br    *bufio.Reader
+	red   *redactor
+	onHit func()
+	n     *atomic.Int64 // bytes released, for the log
+	frame []byte        // redacted, not yet returned
+}
+
+// maxFrame bounds the memory one frame can take.
+const maxFrame = 16 << 20
+
+var errFrame = errors.New("websocket frame refused")
+
+func newFrameScrubber(rwc io.ReadWriteCloser, red *redactor, onHit func(), n *atomic.Int64) io.ReadWriteCloser {
+	return &frameScrubber{ReadWriteCloser: rwc, br: bufio.NewReader(rwc), red: red, onHit: onHit, n: n}
+}
+
+func (f *frameScrubber) Read(p []byte) (int, error) {
+	if len(f.frame) == 0 {
+		if err := f.next(); err != nil {
+			return 0, err
+		}
+	}
+	n := copy(p, f.frame)
+	f.frame = f.frame[n:]
+	f.n.Add(int64(n))
+	return n, nil
+}
+
+func (f *frameScrubber) next() error {
+	head := make([]byte, 2, 10)
+	if _, err := io.ReadFull(f.br, head); err != nil {
+		return err
+	}
+	if head[1]&0x80 != 0 {
+		return errFrame // servers never mask (RFC 6455 §5.1), and we couldn't search a masked payload
+	}
+	size := uint64(head[1])
+	if ext := map[uint64]int{126: 2, 127: 8}[size]; ext > 0 {
+		head = head[:2+ext]
+		if _, err := io.ReadFull(f.br, head[2:]); err != nil {
+			return err
+		}
+		size = 0
+		for _, b := range head[2:] {
+			size = size<<8 | uint64(b)
+		}
+	}
+	if size > maxFrame {
+		return errFrame
+	}
+	frame := append(head, make([]byte, size)...)
+	if _, err := io.ReadFull(f.br, frame[len(head):]); err != nil {
+		return err
+	}
+	if f.red.redact(frame[len(head):]) {
+		f.onHit()
+	}
+	f.frame = frame
+	return nil
+}
