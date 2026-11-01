@@ -1,5 +1,5 @@
-// Package keychain reads upstream credentials. The interface lets tests use
-// an in-memory store; the macOS Keychain implementation lands in Phase 3.
+// Package keychain reads and writes upstream credentials in the macOS
+// Keychain. The Store interface lets tests use an in-memory one.
 package keychain
 
 import "errors"
@@ -16,11 +16,16 @@ type Store interface {
 	Get(service, account string) ([]byte, error)
 }
 
-// System is the login Keychain.
-func System() Store { return unavailable{} }
-
-type unavailable struct{}
-
-func (unavailable) Get(string, string) ([]byte, error) {
-	return nil, errors.New("keychain: not implemented until Phase 3")
+// Reason names a Get failure for responses, logs and key check. It is one
+// of a fixed set, so it never carries error text.
+func Reason(err error) string {
+	switch {
+	case errors.Is(err, ErrLocked):
+		return "keychain_locked"
+	case errors.Is(err, ErrNotFound):
+		return "credential_missing"
+	case errors.Is(err, ErrDenied):
+		return "keychain_denied"
+	}
+	return "keychain_error"
 }

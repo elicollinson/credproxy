@@ -384,14 +384,8 @@ func acquireError(err error) (int, string) {
 		return http.StatusBadGateway, "token_mint_failed"
 	case errors.Is(err, inject.ErrInvalid):
 		return http.StatusServiceUnavailable, "credential_invalid"
-	case errors.Is(err, keychain.ErrLocked):
-		return http.StatusServiceUnavailable, "keychain_locked"
-	case errors.Is(err, keychain.ErrNotFound):
-		return http.StatusServiceUnavailable, "credential_missing"
-	case errors.Is(err, keychain.ErrDenied):
-		return http.StatusServiceUnavailable, "keychain_denied"
 	}
-	return http.StatusServiceUnavailable, "keychain_error"
+	return http.StatusServiceUnavailable, keychain.Reason(err)
 }
 
 // deny writes a fixed error body: reason is always one of our own constants.
