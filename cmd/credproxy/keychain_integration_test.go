@@ -67,40 +67,49 @@ func TestKeychainRoundTrip(t *testing.T) {
 	  "inject": {"type": "bearer"}, "allow": [{"methods": ["GET"], "paths": ["/x"]}]}},
 	  "callers": {"t20": {"token_sha256": "`+strings.Repeat("a", 64)+`", "routes": ["t20"]}}}`), 0o600)
 
-	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
-	build(t, a, "t20-a")
-	build(t, b, "t20-b")
-	if cdhash(t, a) == cdhash(t, b) {
-		t.Fatal("the two builds have the same cdhash, so the rebuild check proves nothing")
-	}
+	// A rebuild overwrites the installed binary, so the second build goes to
+	// the same path: the file keychain also checks the caller's path on delete.
+	bin := filepath.Join(dir, "credproxy")
+	build(t, bin, "t20-a")
+	first := cdhash(t, bin)
 
-	if out, err := credproxy(t, a, "short\n", "key", "set", "-keychain", kc, "t20"); err == nil {
+	if out, err := credproxy(t, bin, "short\n", "key", "set", "-keychain", kc, "t20"); err == nil {
 		t.Fatalf("short secret stored: %s", out)
 	}
-	if out, err := credproxy(t, a, t20Secret+"\n", "key", "set", "-keychain", kc, "t20"); err != nil {
+	if out, err := credproxy(t, bin, t20Secret+"\n", "key", "set", "-keychain", kc, "t20"); err != nil {
 		t.Fatalf("key set: %v %s", err, out)
 	}
-	out, err := credproxy(t, a, "", "key", "list", "-keychain", kc)
+	out, err := credproxy(t, bin, "", "key", "list", "-keychain", kc)
 	if err != nil || strings.TrimSpace(out) != "t20" {
 		t.Fatalf("key list = %q, %v", out, err)
 	}
 
 	// Prompts are off in key check, so a read the ACL or partition list
 	// would have asked about fails as keychain_denied instead of passing.
-	for _, bin := range []string{a, b} {
+	for i, id := range []string{"", "t20-b"} {
+		if id != "" {
+			build(t, bin, id)
+			if cdhash(t, bin) == first {
+				t.Fatal("the rebuild has the same cdhash, so the rebuild check proves nothing")
+			}
+		}
 		out, err = credproxy(t, bin, "", "key", "check", "-config", cfg, "-keychain", kc)
 		if err != nil || !strings.Contains(out, "ok") {
-			t.Fatalf("%s key check (rebuilt binary must read with no prompt): %v\n%s", filepath.Base(bin), err, out)
+			t.Fatalf("build %d key check (rebuilt binary must read with no prompt): %v\n%s", i+1, err, out)
 		}
 	}
 	if strings.Contains(out, t20Secret) {
 		t.Fatal("key check printed the secret")
 	}
 
-	if out, err := credproxy(t, b, "", "key", "rm", "-keychain", kc, "t20"); err != nil {
+	// The rebuilt binary can also replace and remove what the first made.
+	if out, err := credproxy(t, bin, t20Secret+"-rotated\n", "key", "set", "-keychain", kc, "t20"); err != nil {
+		t.Fatalf("key set from the rebuild: %v %s", err, out)
+	}
+	if out, err := credproxy(t, bin, "", "key", "rm", "-keychain", kc, "t20"); err != nil {
 		t.Fatalf("key rm: %v %s", err, out)
 	}
-	out, _ = credproxy(t, a, "", "key", "check", "-config", cfg, "-keychain", kc)
+	out, _ = credproxy(t, bin, "", "key", "check", "-config", cfg, "-keychain", kc)
 	if !strings.Contains(out, "credential_missing") {
 		t.Fatalf("after rm, key check = %s", out)
 	}
