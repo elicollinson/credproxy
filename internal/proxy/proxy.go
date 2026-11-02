@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/elicollinson/credproxy/internal/config"
@@ -76,8 +77,9 @@ type state struct {
 	rest                                    string // the path below the route name
 	cred                                    inject.Cred
 	red                                     *redactor
-	echoed                                  bool
+	echoed, upgraded                        bool
 	bytesIn                                 countingReader
+	upgradedOut                             atomic.Int64 // bytes sent after a 101
 }
 
 type stateKey struct{}
@@ -104,8 +106,14 @@ func New(cfg *config.Config, store keychain.Store, opts Options) (*Proxy, error)
 	for _, alias := range cfg.HostAliases {
 		p.hosts[strings.ToLower(alias)] = true
 	}
+	env := inject.Env{Now: opts.Now, Client: &http.Client{
+		Transport: newTransport(opts, &config.Route{}),
+		Timeout:   30 * time.Second,
+		// A token endpoint that redirects gets no assertion a second time.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 	for name, rc := range cfg.Routes {
-		inj, err := inject.New(rc)
+		inj, err := inject.New(rc, env)
 		if err != nil {
 			return nil, fmt.Errorf("routes.%s: %w", name, err)
 		}
@@ -251,7 +259,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, st *state) (int, s
 
 	st.cred, err = rt.inject.Acquire(r.Context(), p.store)
 	if err != nil {
-		return http.StatusServiceUnavailable, keychainReason(err)
+		return acquireError(err)
 	}
 	st.red = newRedactor(st.cred.Needles)
 
@@ -318,11 +326,18 @@ func (rt *route) modifyResponse(resp *http.Response) error {
 			}
 		}
 	}
-	// Phase 2 (R13) scrubs upgraded streams too; ReverseProxy needs their
-	// body to stay an io.ReadWriteCloser.
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		resp.Body = newScrubber(resp.Body, st.red, func() { st.echoed = true })
+	onHit := func() { st.echoed = true }
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		// ReverseProxy writes the 101 itself, after hijacking.
+		st.upgraded = true
+		rwc, ok := resp.Body.(io.ReadWriteCloser)
+		if !ok {
+			return errors.New("upgrade without a connection")
+		}
+		resp.Body = newFrameScrubber(rwc, st.red, onHit, &st.upgradedOut)
+		return nil
 	}
+	resp.Body = newScrubber(resp.Body, st.red, onHit)
 	return nil
 }
 
@@ -361,16 +376,16 @@ func (p *Proxy) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-func keychainReason(err error) string {
+// acquireError maps a failure to get the credential to a response: 502
+// when a token endpoint failed us (R16), otherwise 503.
+func acquireError(err error) (int, string) {
 	switch {
-	case errors.Is(err, keychain.ErrLocked):
-		return "keychain_locked"
-	case errors.Is(err, keychain.ErrNotFound):
-		return "credential_missing"
-	case errors.Is(err, keychain.ErrDenied):
-		return "keychain_denied"
+	case errors.Is(err, inject.ErrMint):
+		return http.StatusBadGateway, "token_mint_failed"
+	case errors.Is(err, inject.ErrInvalid):
+		return http.StatusServiceUnavailable, "credential_invalid"
 	}
-	return "keychain_error"
+	return http.StatusServiceUnavailable, keychain.Reason(err)
 }
 
 // deny writes a fixed error body: reason is always one of our own constants.

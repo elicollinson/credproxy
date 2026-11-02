@@ -21,6 +21,7 @@ It never holds a key it could carry off and use elsewhere. Revoking a caller is 
 **Residual risks we accept:**
 
 - **Keychain prompts.** Another process asking for a credproxy item gets a Keychain dialog that names it. If I click "Always Allow", that process is trusted from then on. Synthetic clicks on that dialog are blocked by TCC, so the defence holds as long as I don't approve the dialog myself.
+- **The signing key.** The Keychain trusts whatever is signed with my identity, and that identity's private key is in my login keychain too. Same-user code that can use the key can sign its own binary as credproxy and read every item. When `codesign` asks to use the key, I click "Allow", never "Always Allow", so every signing prompts and an unexpected prompt is the signal. Stronger: keep the identity in a separate keychain that stays locked except during `make build`.
 - **Port squatting.** Same-user code can stop the LaunchAgent and bind its port to collect caller tokens. Caller tokens aren't upstream keys, so this gains it nothing beyond what it already had.
 - **Config edits.** Same-user code can edit the config to widen its own allowlist. The config file is user-writable by necessity. **Mitigation:** credproxy refuses to start unless the config file is mode `0600` or stricter and owned by me, and it logs a SHA-256 of the config at start. It doesn't stop the edit, but the change shows up in the log. I don't think anything stronger is worth its complexity under this threat model. Push back if you disagree.
 
@@ -297,13 +298,14 @@ Each rule gets at least one test (§7).
   - Error responses to callers are fixed strings.
 - **R11. Response scrubbing.** Response headers and body are scanned for the injected secret (raw, plus its basic-auth base64 and its JSON-escaped forms) and replaced at the same length. A match logs `alert: "upstream_echoed_secret"` at warn level. The streaming matcher keeps a tail of `len(secret)−1` bytes across chunks, and each chunk is flushed immediately after the scan.
 - **R12. Streaming.** `FlushInterval: -1`. There is no total-response timeout and no `WriteTimeout`. SSE events reach the caller as they arrive.
-- **R13. WebSocket.** Upgrades are allowed only on routes with `"websocket": true`. They go through the same auth, allowlist, strip and inject (including `query` injection). `Sec-WebSocket-Extensions` is stripped. After the 101, server-to-client bytes still pass through the scrubber.
+- **R13. WebSocket.** Upgrades are allowed only on routes with `"websocket": true`. They go through the same auth, allowlist, strip and inject (including `query` injection). `Sec-WebSocket-Extensions` is stripped. After the 101, server-to-client frames are redacted one frame at a time and released as soon as each is complete. (The byte-stream scrubber's held-back tail could stall the last message of a turn.) Server frames that are masked, or larger than 16 MiB, close the connection. A secret split across two fragments of one message is not caught.
 - **R14. Size limits.** A declared `Content-Length` over the limit is a 413 straight away. A body of unknown length is read into memory first, up to the limit, so an oversized one never reaches the upstream. Headers are limited by `MaxHeaderBytes` (64 KiB).
 - **R15. Isolated rate limits.** Each caller has its own token bucket, and one caller's exhaustion never affects another's. A 429 never reveals other callers' state, and it is decided only after authentication, so it reveals nothing to an unauthenticated client.
 - **R16. Google SA.** The SA private key is used only inside the process to sign the JWT. Rules:
   - `token_uri` must equal `https://oauth2.googleapis.com/token`; anything else refuses to mint.
   - The access token is cached until 5 minutes before `expires_in`, with single-flight refresh.
   - A refresh failure is a 502 and is never retried in a loop.
+  - An SA JSON that doesn't parse, has no RSA key, or names another `token_uri` is a 503 `credential_invalid`, and nothing is contacted.
 - **R17. Startup fails closed.** Any config error, a config file looser than `0600` or not owned by me, or a non-loopback listener without opt-in stops startup.
 - **R18. Signed and hardened.** The `make` build signs with `$(SIGN_IDENTITY)` (self-signed or Apple Development, §3), using `--options runtime` (the hardened runtime) and no `get-task-allow` entitlement. That blocks same-user debugger attach and dylib injection. `key set` refuses to run unless the running binary is validly signed (`SecCodeCheckValidity` on self). Without that check, an unsigned dev build would create items pinned to a throwaway cdhash.
 

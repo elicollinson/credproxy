@@ -7,12 +7,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
-	"errors"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +31,7 @@ import (
 	"time"
 
 	"github.com/elicollinson/credproxy/internal/config"
+	"github.com/elicollinson/credproxy/internal/keychain"
 )
 
 // Fixture secrets. TestMain fails the run if any of them, or "key=", reaches
@@ -37,13 +40,21 @@ const (
 	openrouterSecret = "sk-or-REAL-SECRET-0123456789abcdef"
 	githubSecret     = "ghp_REAL_SECRET_abcdefghijklmnop"
 	searchSecret     = "BSA-REAL-SECRET-zyxwvutsrqponmlk"
+	braveSecret      = "BRAVE-REAL-SECRET-0123456789abcd"
+	wandbSecret      = "wandb-REAL/SECRET+0123456789abcdef"
+	geminiSecret     = "AIzaREAL-SECRET-0123456789abcdefgh"
+	accessToken      = "ya29.REAL-ACCESS-TOKEN-" // the token endpoint appends a serial
+	saEmail          = "proxy@my-proj.iam.gserviceaccount.com"
 	aliceToken       = "cpx_alice_0000000000000000000000000000000000000"
 	bobToken         = "cpx_bob_111111111111111111111111111111111111111"
 	strangerToken    = "cpx_stranger_22222222222222222222222222222222222"
 	canary           = "CANARY-ffffffffffffffff"
 )
 
-var leakNeedles = []string{openrouterSecret, githubSecret, searchSecret, aliceToken, bobToken, strangerToken, canary, "key="}
+var leakNeedles = []string{
+	openrouterSecret, githubSecret, searchSecret, braveSecret, wandbSecret, geminiSecret, accessToken,
+	aliceToken, bobToken, strangerToken, canary, "key=", "PRIVATE KEY",
+}
 
 var (
 	logs syncBuffer
@@ -51,10 +62,15 @@ var (
 		pool *x509.CertPool
 		leaf tls.Certificate
 	}
+	// saKey signs the fixture service account's JWTs; saJSON and saBadJSON
+	// are the Keychain items, the second with a token_uri we must refuse.
+	saKey             *rsa.PrivateKey
+	saJSON, saBadJSON string
 )
 
 func TestMain(m *testing.M) {
-	pki.pool, pki.leaf = testPKI("up.test", "evil.test", "dead.test")
+	pki.pool, pki.leaf = testPKI("up.test", "evil.test", "dead.test", "oauth2.googleapis.com")
+	saKey, saJSON, saBadJSON = testServiceAccount()
 
 	// Capture fd 2 itself, so the standard logger and runtime output are
 	// checked too, not only writes through os.Stderr.
@@ -144,6 +160,27 @@ func testPKI(hosts ...string) (*x509.CertPool, tls.Certificate) {
 	return pool, tls.Certificate{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}
 }
 
+// testServiceAccount makes a key and the SA JSON Google issues for it.
+func testServiceAccount() (*rsa.PrivateKey, string, string) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
+	der, _ := x509.MarshalPKCS8PrivateKey(key)
+	sa := map[string]string{
+		"type":           "service_account",
+		"project_id":     "my-proj",
+		"private_key_id": "kid-1",
+		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"client_email":   saEmail,
+		"token_uri":      "https://oauth2.googleapis.com/token",
+	}
+	good, _ := json.Marshal(sa)
+	sa["token_uri"] = "https://evil.test/token"
+	bad, _ := json.Marshal(sa)
+	return key, string(good), string(bad)
+}
+
 // upstream is a fake API that records what reached it.
 type upstream struct {
 	srv   *httptest.Server
@@ -202,7 +239,7 @@ func (m *memStore) Get(service, account string) ([]byte, error) {
 	}
 	s, ok := m.items[service+"/"+account]
 	if !ok {
-		return nil, errors.New("not found")
+		return nil, keychain.ErrNotFound
 	}
 	return []byte(s), nil
 }
@@ -262,10 +299,47 @@ var testConfig = `{
       "credential": {"account": "boom"},
       "inject": {"type": "bearer"},
       "allow": [{"methods": ["GET"], "paths": ["/x"]}]
+    },
+    "brave": {
+      "upstream": "https://up.test/res/v1",
+      "credential": {"account": "brave"},
+      "inject": {"type": "header", "name": "X-Subscription-Token"},
+      "caller_auth": ["header:X-Subscription-Token"],
+      "allow": [{"methods": ["GET"], "paths": ["/web/search"]}]
+    },
+    "wandb": {
+      "upstream": "https://up.test",
+      "credential": {"account": "wandb"},
+      "inject": {"type": "basic", "username": "api"},
+      "caller_auth": ["basic_password"],
+      "allow": [{"methods": ["POST"], "paths": ["/graphql", "/echo"]}]
+    },
+    "gemini": {
+      "upstream": "https://up.test",
+      "credential": {"account": "gemini"},
+      "inject": {"type": "query", "name": "key"},
+      "caller_auth": ["header:x-goog-api-key", "query:key"],
+      "websocket": true,
+      "allow": [
+        {"methods": ["POST"], "paths": ["/v1beta/models/*"]},
+        {"methods": ["GET"], "paths": ["/ws"]}
+      ]
+    },
+    "gcp": {
+      "upstream": "https://up.test",
+      "credential": {"account": "gcp-sa"},
+      "inject": {"type": "google_service_account", "scopes": ["https://www.googleapis.com/auth/cloud-platform"]},
+      "allow": [{"methods": ["POST"], "paths": ["/v1/**"]}]
+    },
+    "gcp-bad": {
+      "upstream": "https://up.test",
+      "credential": {"account": "gcp-bad"},
+      "inject": {"type": "google_service_account", "scopes": ["https://www.googleapis.com/auth/cloud-platform"]},
+      "allow": [{"methods": ["POST"], "paths": ["/v1/**"]}]
     }
   },
   "callers": {
-    "alice": {"token_sha256": "` + tokenHash(aliceToken) + `", "routes": ["openrouter", "github-issues", "search", "dead", "wrongcert", "boom"]},
+    "alice": {"token_sha256": "` + tokenHash(aliceToken) + `", "routes": ["openrouter", "github-issues", "search", "dead", "wrongcert", "boom", "brave", "wandb", "gemini", "gcp", "gcp-bad"]},
     "bob": {"token_sha256": "` + tokenHash(bobToken) + `", "routes": ["openrouter"], "rate_limit_per_min": 6}
   }
 }`
@@ -275,6 +349,7 @@ type harness struct {
 	addr  string // the proxy, host:port
 	up    *upstream
 	evil  *upstream
+	tok   *tokenServer
 	store *memStore
 	clock *fakeClock
 	p     *Proxy
@@ -298,9 +373,15 @@ func newHarness(t *testing.T, h http.HandlerFunc) *harness {
 			"credproxy/openrouter": openrouterSecret,
 			"credproxy/github":     githubSecret,
 			"credproxy/search":     searchSecret,
+			"credproxy/brave":      braveSecret,
+			"credproxy/wandb":      wandbSecret,
+			"credproxy/gemini":     geminiSecret,
+			"credproxy/gcp-sa":     saJSON,
+			"credproxy/gcp-bad":    saBadJSON,
 		}},
 		clock: &fakeClock{now: time.Unix(1_800_000_000, 0)},
 	}
+	hs.tok = newTokenServer(t, hs.clock)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -324,6 +405,8 @@ func newHarness(t *testing.T, h http.HandlerFunc) *harness {
 				return dialer.DialContext(ctx, network, hs.up.srv.Listener.Addr().String())
 			case "evil.test:443":
 				return dialer.DialContext(ctx, network, hs.evil.srv.Listener.Addr().String())
+			case "oauth2.googleapis.com:443":
+				return dialer.DialContext(ctx, network, hs.tok.up.srv.Listener.Addr().String())
 			}
 			return nil, fmt.Errorf("dial %s: no such host", addr)
 		},
