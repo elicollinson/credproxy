@@ -1,5 +1,8 @@
 package main
 
+// #include <termios.h>
+import "C"
+
 import (
 	"bufio"
 	"bytes"
@@ -9,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"unsafe"
 )
 
 // minSecret is the shortest secret key set accepts. Anything shorter is
@@ -39,26 +41,24 @@ func readSecret(f *os.File, prompt string) ([]byte, error) {
 	return b, nil
 }
 
-func termios(f *os.File) (syscall.Termios, bool) {
-	var t syscall.Termios
-	return t, ioctl(f, syscall.TIOCGETA, &t) == nil
+func termios(f *os.File) (C.struct_termios, bool) {
+	var t C.struct_termios
+	return t, C.tcgetattr(C.int(f.Fd()), &t) == 0
 }
 
-// Each unsafe use is a cgo or ioctl boundary and is marked for opengrep
-// line by line, so a new unsafe use still fails the security scan.
-func ioctl(f *os.File, req uintptr, t *syscall.Termios) error {
-	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), req, uintptr(unsafe.Pointer(t))); e != 0 { // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
-		return e
+func setTermios(f *os.File, t *C.struct_termios) error {
+	if C.tcsetattr(C.int(f.Fd()), C.TCSANOW, t) != 0 {
+		return errors.New("cannot set terminal mode")
 	}
 	return nil
 }
 
 // readNoEcho turns echo off for one line and always puts it back, on
 // Ctrl-C too.
-func readNoEcho(f *os.File, old syscall.Termios, prompt string) ([]byte, error) {
+func readNoEcho(f *os.File, old C.struct_termios, prompt string) ([]byte, error) {
 	noEcho := old
-	noEcho.Lflag &^= syscall.ECHO
-	if err := ioctl(f, syscall.TIOCSETA, &noEcho); err != nil {
+	noEcho.c_lflag &^= C.ECHO
+	if err := setTermios(f, &noEcho); err != nil {
 		return nil, err
 	}
 	sig := make(chan os.Signal, 1)
@@ -67,13 +67,13 @@ func readNoEcho(f *os.File, old syscall.Termios, prompt string) ([]byte, error) 
 	defer func() {
 		signal.Stop(sig)
 		close(done)
-		ioctl(f, syscall.TIOCSETA, &old)
+		setTermios(f, &old)
 		fmt.Fprintln(os.Stderr)
 	}()
 	go func() {
 		select {
 		case <-sig:
-			ioctl(f, syscall.TIOCSETA, &old)
+			setTermios(f, &old)
 			fmt.Fprintln(os.Stderr)
 			os.Exit(130)
 		case <-done:

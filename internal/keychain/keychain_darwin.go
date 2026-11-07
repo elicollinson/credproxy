@@ -3,8 +3,32 @@ package keychain
 /*
 #cgo CFLAGS: -Wno-deprecated-declarations
 #cgo LDFLAGS: -framework Security -framework CoreFoundation
+#define __STDC_WANT_LIB_EXT1__ 1 // memset_s
 #include <stdlib.h>
+#include <string.h>
 #include <Security/Security.h>
+
+// Pointer work stays on this side, so the Go code needs no unsafe.
+
+// cstr returns a malloc'd UTF-8 copy of s, or NULL. The caller frees it.
+static char *cstr(CFStringRef s) {
+	if (!s) return NULL;
+	CFIndex n = CFStringGetMaximumSizeForEncoding(CFStringGetLength(s), kCFStringEncodingUTF8) + 1;
+	char *b = malloc(n);
+	if (b && !CFStringGetCString(s, b, n, kCFStringEncodingUTF8)) { free(b); b = NULL; }
+	return b;
+}
+
+static void free_str(char *s) { free(s); }
+
+// wipe_free zeroes a secret, then frees it. memset_s is never optimised away.
+static void wipe_free(UInt8 *p, size_t n) {
+	if (!p) return;
+	memset_s(p, n, 0, n);
+	free(p);
+}
+
+static const void *data_bytes(CFDataRef d) { return CFDataGetBytePtr(d); }
 
 static CFStringRef str(const char *s) {
 	return CFStringCreateWithCString(NULL, s, kCFStringEncodingUTF8);
@@ -104,8 +128,9 @@ static OSStatus cp_list(const char *path, const char *service, CFArrayRef *items
 	return st;
 }
 
-static CFStringRef cp_account(CFArrayRef items, CFIndex i) {
-	return CFDictionaryGetValue(CFArrayGetValueAtIndex(items, i), kSecAttrAccount);
+// cp_account returns item i's account name, for the caller to free.
+static char *cp_account(CFArrayRef items, CFIndex i) {
+	return cstr(CFDictionaryGetValue(CFArrayGetValueAtIndex(items, i), kSecAttrAccount));
 }
 
 // cp_locked reports whether the keychain at path (or the default) is locked.
@@ -119,8 +144,9 @@ static int cp_locked(const char *path) {
 	return st == errSecSuccess && !(status & kSecUnlockStateStatus);
 }
 
-// cp_self describes this process's own signature.
-static OSStatus cp_self(char *ident, CFIndex n, CFIndex *certs, uint32_t *flags) {
+// cp_self describes this process's own signature. The caller frees *ident.
+static OSStatus cp_self(char **ident, CFIndex *certs, uint32_t *flags) {
+	*ident = NULL;
 	SecCodeRef code;
 	OSStatus st = SecCodeCopySelf(kSecCSDefaultFlags, &code);
 	if (st) return st;
@@ -129,9 +155,7 @@ static OSStatus cp_self(char *ident, CFIndex n, CFIndex *certs, uint32_t *flags)
 	st = SecCodeCopySigningInformation((SecStaticCodeRef)code, kSecCSSigningInformation, &info);
 	CFRelease(code);
 	if (st) return st;
-	ident[0] = 0;
-	CFStringRef id = CFDictionaryGetValue(info, kSecCodeInfoIdentifier);
-	if (id) CFStringGetCString(id, ident, n, kCFStringEncodingUTF8);
+	*ident = cstr(CFDictionaryGetValue(info, kSecCodeInfoIdentifier));
 	CFArrayRef chain = CFDictionaryGetValue(info, kSecCodeInfoCertificates);
 	*certs = chain ? CFArrayGetCount(chain) : 0;
 	CFNumberRef f = CFDictionaryGetValue(info, kSecCodeInfoFlags);
@@ -143,12 +167,7 @@ static OSStatus cp_self(char *ident, CFIndex n, CFIndex *certs, uint32_t *flags)
 */
 import "C"
 
-// Each unsafe use is a cgo or ioctl boundary and is marked for opengrep
-// line by line, so a new unsafe use still fails the security scan.
-import (
-	"fmt"
-	"unsafe"
-)
+import "fmt"
 
 // Keychain is the macOS Keychain: the default search list, or one keychain
 // file (tests use a throwaway one).
@@ -169,19 +188,16 @@ func (k *Keychain) Get(service, account string) ([]byte, error) {
 		return nil, err
 	}
 	defer C.CFRelease(C.CFTypeRef(data))
-	return C.GoBytes(unsafe.Pointer(C.CFDataGetBytePtr(data)), C.int(C.CFDataGetLength(data))), nil // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+	return C.GoBytes(C.data_bytes(data), C.int(C.CFDataGetLength(data))), nil
 }
 
 // Set stores secret, replacing any item of the same name so the ACL is
 // always this binary's.
 func (k *Keychain) Set(service, account string, secret []byte) error {
 	label := C.CString("credproxy: " + account)
-	defer C.free(unsafe.Pointer(label)) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+	defer C.free_str(label)
 	ptr := (*C.UInt8)(C.CBytes(secret))
-	defer func() {
-		clear(unsafe.Slice((*byte)(ptr), len(secret))) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
-		C.free(unsafe.Pointer(ptr))                    // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
-	}()
+	defer C.wipe_free(ptr, C.size_t(len(secret)))
 	return k.call(func(p, s, a *C.char) C.OSStatus {
 		return C.cp_set(p, s, a, label, ptr, C.CFIndex(len(secret)))
 	}, service, account)
@@ -204,11 +220,10 @@ func (k *Keychain) List(service string) ([]string, error) {
 	}
 	defer C.CFRelease(C.CFTypeRef(items))
 	var names []string
-	buf := make([]byte, 1024)
 	for i := range C.CFArrayGetCount(items) {
-		acct := C.cp_account(items, i)
-		if acct != 0 && C.CFStringGetCString(acct, (*C.char)(unsafe.Pointer(&buf[0])), C.CFIndex(len(buf)), C.kCFStringEncodingUTF8) != 0 { // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
-			names = append(names, C.GoString((*C.char)(unsafe.Pointer(&buf[0])))) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+		if acct := C.cp_account(items, i); acct != nil {
+			names = append(names, C.GoString(acct))
+			C.free_str(acct)
 		}
 	}
 	return names, nil
@@ -220,14 +235,14 @@ func (k *Keychain) call(f func(path, service, account *C.char) C.OSStatus, servi
 	var path, acct *C.char
 	if k.path != "" {
 		path = C.CString(k.path)
-		defer C.free(unsafe.Pointer(path)) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+		defer C.free_str(path)
 	}
 	if account != "" {
 		acct = C.CString(account)
-		defer C.free(unsafe.Pointer(acct)) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+		defer C.free_str(acct)
 	}
 	svc := C.CString(service)
-	defer C.free(unsafe.Pointer(svc)) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+	defer C.free_str(svc)
 	st := f(path, svc, acct)
 	switch {
 	case st == C.errSecSuccess:
@@ -252,13 +267,15 @@ const Identifier = "com.elicollinson.credproxy"
 // certificate (not ad-hoc), as Identifier, with the hardened runtime. key
 // set uses it so it never creates items pinned to a throwaway build (R18).
 func CheckSigned() error {
-	ident := make([]byte, 256)
+	var ident *C.char
 	var certs C.CFIndex
 	var flags C.uint32_t
-	if st := C.cp_self((*C.char)(unsafe.Pointer(&ident[0])), C.CFIndex(len(ident)), &certs, &flags); st != C.errSecSuccess { // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+	st := C.cp_self(&ident, &certs, &flags)
+	defer C.free_str(ident)
+	if st != C.errSecSuccess {
 		return fmt.Errorf("this binary's signature is not valid (OSStatus %d); build it with make", int(st))
 	}
-	id := C.GoString((*C.char)(unsafe.Pointer(&ident[0]))) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+	id := C.GoString(ident)
 	switch {
 	case certs == 0:
 		return fmt.Errorf("this binary is ad-hoc signed; build it with make so items survive rebuilds")
