@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>@LABEL@</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@BIN@</string>
+		<string>serve</string>
+		<string>-config</string>
+		<string>@CONFIG@</string>
+	</array>
+	<!-- A LaunchAgent in the GUI session, not a LaunchDaemon: the login
+	     keychain is only unlocked there. -->
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>@LOG@</string>
+	<key>StandardErrorPath</key>
+	<string>@LOG@</string>
+</dict>
+</plist>
