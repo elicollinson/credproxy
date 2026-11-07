@@ -47,7 +47,7 @@ func termios(f *os.File) (syscall.Termios, bool) {
 // Each unsafe use is a cgo or ioctl boundary and is marked for opengrep
 // line by line, so a new unsafe use still fails the security scan.
 func ioctl(f *os.File, req uintptr, t *syscall.Termios) error {
-	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), req, uintptr(unsafe.Pointer(t))); e != 0 { // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), req, uintptr(unsafe.Pointer(t))); e != 0 { // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 		return e
 	}
 	return nil

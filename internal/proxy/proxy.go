@@ -281,7 +281,7 @@ func (rt *route) rewrite(pr *httputil.ProxyRequest) {
 	out.URL.Scheme, out.URL.Host = base.Scheme, base.Host
 	out.URL.Path, out.URL.RawPath = base.Path+st.rest, ""
 	// out is ReverseProxy's per-request clone; the config's base URL is only read.
-	out.Host = "" // nosemgrep: go.lang.security.shared-url-struct-mutation
+	out.Host = "" // nosemgrep: _temp.opengrep-rules.go.lang.security.shared-url-struct-mutation
 	if q := out.URL.Query(); rt.stripParams(q) {
 		out.URL.RawQuery = q.Encode()
 	}

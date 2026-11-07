@@ -169,18 +169,18 @@ func (k *Keychain) Get(service, account string) ([]byte, error) {
 		return nil, err
 	}
 	defer C.CFRelease(C.CFTypeRef(data))
-	return C.GoBytes(unsafe.Pointer(C.CFDataGetBytePtr(data)), C.int(C.CFDataGetLength(data))), nil // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+	return C.GoBytes(unsafe.Pointer(C.CFDataGetBytePtr(data)), C.int(C.CFDataGetLength(data))), nil // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 }
 
 // Set stores secret, replacing any item of the same name so the ACL is
 // always this binary's.
 func (k *Keychain) Set(service, account string, secret []byte) error {
 	label := C.CString("credproxy: " + account)
-	defer C.free(unsafe.Pointer(label)) // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+	defer C.free(unsafe.Pointer(label)) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 	ptr := (*C.UInt8)(C.CBytes(secret))
 	defer func() {
-		clear(unsafe.Slice((*byte)(ptr), len(secret))) // nosemgrep: go.lang.security.audit.use-of-unsafe-block
-		C.free(unsafe.Pointer(ptr))                    // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+		clear(unsafe.Slice((*byte)(ptr), len(secret))) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+		C.free(unsafe.Pointer(ptr))                    // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 	}()
 	return k.call(func(p, s, a *C.char) C.OSStatus {
 		return C.cp_set(p, s, a, label, ptr, C.CFIndex(len(secret)))
@@ -207,8 +207,8 @@ func (k *Keychain) List(service string) ([]string, error) {
 	buf := make([]byte, 1024)
 	for i := range C.CFArrayGetCount(items) {
 		acct := C.cp_account(items, i)
-		if acct != 0 && C.CFStringGetCString(acct, (*C.char)(unsafe.Pointer(&buf[0])), C.CFIndex(len(buf)), C.kCFStringEncodingUTF8) != 0 { // nosemgrep: go.lang.security.audit.use-of-unsafe-block
-			names = append(names, C.GoString((*C.char)(unsafe.Pointer(&buf[0])))) // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+		if acct != 0 && C.CFStringGetCString(acct, (*C.char)(unsafe.Pointer(&buf[0])), C.CFIndex(len(buf)), C.kCFStringEncodingUTF8) != 0 { // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
+			names = append(names, C.GoString((*C.char)(unsafe.Pointer(&buf[0])))) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 		}
 	}
 	return names, nil
@@ -220,14 +220,14 @@ func (k *Keychain) call(f func(path, service, account *C.char) C.OSStatus, servi
 	var path, acct *C.char
 	if k.path != "" {
 		path = C.CString(k.path)
-		defer C.free(unsafe.Pointer(path)) // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+		defer C.free(unsafe.Pointer(path)) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 	}
 	if account != "" {
 		acct = C.CString(account)
-		defer C.free(unsafe.Pointer(acct)) // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+		defer C.free(unsafe.Pointer(acct)) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 	}
 	svc := C.CString(service)
-	defer C.free(unsafe.Pointer(svc)) // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+	defer C.free(unsafe.Pointer(svc)) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 	st := f(path, svc, acct)
 	switch {
 	case st == C.errSecSuccess:
@@ -255,10 +255,10 @@ func CheckSigned() error {
 	ident := make([]byte, 256)
 	var certs C.CFIndex
 	var flags C.uint32_t
-	if st := C.cp_self((*C.char)(unsafe.Pointer(&ident[0])), C.CFIndex(len(ident)), &certs, &flags); st != C.errSecSuccess { // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+	if st := C.cp_self((*C.char)(unsafe.Pointer(&ident[0])), C.CFIndex(len(ident)), &certs, &flags); st != C.errSecSuccess { // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 		return fmt.Errorf("this binary's signature is not valid (OSStatus %d); build it with make", int(st))
 	}
-	id := C.GoString((*C.char)(unsafe.Pointer(&ident[0]))) // nosemgrep: go.lang.security.audit.use-of-unsafe-block
+	id := C.GoString((*C.char)(unsafe.Pointer(&ident[0]))) // nosemgrep: _temp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block
 	switch {
 	case certs == 0:
 		return fmt.Errorf("this binary is ad-hoc signed; build it with make so items survive rebuilds")
