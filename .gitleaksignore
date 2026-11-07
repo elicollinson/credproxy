@@ -1,0 +1,4 @@
+# Fake fixture secrets in tests, by the commit that added each. Fingerprints
+# pin the exact commit, file, rule and line, so any new hit still fails.
+3a494dc4a29d91cbe568fb555e85016b1a548199:internal/proxy/proxy_test.go:generic-api-key:364
+24581ab2c66e7ee01e4feebee13678d33555f49d:cmd/credproxy/keychain_integration_test.go:generic-api-key:21

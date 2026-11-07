@@ -18,11 +18,12 @@ jobs:
   scan:
     permissions:
       contents: read
-      security-events: write
+      security-events: write # each scanner uploads SARIF to code scanning
     uses: elicollinson/security-workflows/.github/workflows/scan.yml@d8a9379a5c350ae0883358fc4eb9ceee3a39cc19 # v1.1.0
 
   # Single required check for the ruleset: passes only if every scan job passed.
   security:
+    name: security
     if: ${{ always() }}
     needs: scan
     runs-on: ubuntu-latest

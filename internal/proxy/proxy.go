@@ -13,6 +13,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -279,7 +280,8 @@ func (rt *route) rewrite(pr *httputil.ProxyRequest) {
 	base := rt.cfg.Base
 	out.URL.Scheme, out.URL.Host = base.Scheme, base.Host
 	out.URL.Path, out.URL.RawPath = base.Path+st.rest, ""
-	out.Host = ""
+	// out is ReverseProxy's per-request clone; the config's base URL is only read.
+	out.Host = "" // nosemgrep: go.lang.security.shared-url-struct-mutation
 	if q := out.URL.Query(); rt.stripParams(q) {
 		out.URL.RawQuery = q.Encode()
 	}
@@ -388,9 +390,12 @@ func acquireError(err error) (int, string) {
 	return http.StatusServiceUnavailable, keychain.Reason(err)
 }
 
-// deny writes a fixed error body: reason is always one of our own constants.
+// deny writes a fixed error body. reason is always one of our own
+// constants, and is JSON-encoded anyway.
 func deny(w http.ResponseWriter, status int, reason string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	io.WriteString(w, `{"error":"`+reason+`"}`+"\n")
+	json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{reason})
 }
